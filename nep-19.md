@@ -3,7 +3,9 @@
   Title: Neo N3 Contract Debug Info Specification
   Author: Harry Pierson (harrypierson@hotmail.com)
   Type: Standard
-  Status: Accepted
+  Status: 
+    Version 1: Accepted
+    Version 2: Draft
   Created: 2019-09-02
 </pre>
 
@@ -24,10 +26,52 @@ about parameters, variables and storage items that exists in the contract source
 needed by the NeoVM and is discarded during contract compilation. The debugger also needs to source
 map information in order to map binary addresses in compiled contracts to locations in source code.
 
+### Version 2 Motivation
+
+About six months after Neo N3 MainNet shipped, the debugger shipped a preview feature called 
+[Storage Schema](https://github.com/neo-project/neo-debugger/blob/master/docs/storage-schema-overview.md).
+Storage Schema improves the developer experience by automatically decoding the contents of contract
+storage keys and items.
+
+In order to decode storage keys and items, the debugger needs type information about contract
+storage. For the initial preview release, this type information lives in a separate JSON file
+that is written by hand. Obviously, forcing the developer to maintain a separate file is less than
+ideal, so work started on upgrading the NCCS compiler to emit storage schema information automatically
+from source code.
+
+As part of this work, a model for storage type information was created. While the runtime types
+were limited to type information that can be encoded as a
+[ContractParameterType](https://github.com/neo-project/neo/blob/master/src/neo/SmartContract/ContractParameterType.cs),
+the storage type model could encode additional type information such as the fields of a structure,
+the type of a homogeneous collection or the key and value types of a map.
+
+It turned out to be trivial to extend the storage type information model to also support runtime
+types. Futhermore, it turned out to be straightforward to generate this additional type information
+for runtime types during compilation in the NCCS compiler. As such, the type information model was
+renamed as the "contract type information model" and the NCCS compiler was further updated to generate
+this unified type information for both runtime and storage types.
+
+While maintaining mostly the same structure, the string encoding of this new type model forces version
+2 of the debug info format to break backwards compatibility with version 1. As such, the updated format
+includes a `version` property so that the debugger can correctly interpret string encoded type information.
+Of course, the debugger supports both v1 and v2 debug information, enabling programming language teams
+to move to the new format in a time frame of their own choosing. There are no plans to remove support
+for v1 debug information, so programming language teams don't have to update their compilers at all
+if they so choose.
+
+> Note, generating richer contract type model in NCCS is straightforward in part because of the rich type
+  information available in C#. Supporting some aspects of the new contract type model may be more difficult
+  or impossible in Neo compilers for dynamic lanugages such as Python. The v2 format has been designed
+  with such language limitations in mind. However, the contract type model is expected to evolve based
+  on feedback from Neo compiler teams as they upgrade their compilers to enable the new debugger functionality.
+
 ## Rationale
 
-This format has been implemented by the Neo Smart Contract Debugger and multiple Neo smart contract
+Version 1 of this format has been implemented by the Neo Smart Contract Debugger and multiple Neo smart contract
 compilers including NCCS, NEON, neo-boa, Neow3j and neo-go.
+
+Version 2 of this format enables an improved variable inspection experience and supports both runtime and
+storage types.
 
 ## Debug Info Format Specification
 
@@ -50,28 +94,28 @@ The debug info has the following structure. Note, for space optimization, severa
 multiple pieces of information encoded as a string. Those encodings are indicated in comments in the code below.
 
 ``` ts
-type TypeName = string; // format: ContractParamterType enum value
-
-type MemberName = string // format: "{namespace},{display-name}
-
-type Variable = string; // format: "{name},{TypeName}(,{slotIndex})?
+type EncodedType = string; // format: For v1, this is a ContractParamterType enum value
+                           //         For v2, this is a string encoded ContractType. Details below
+type MemberName = string   // format: "{namespace},{display-name}
+type Variable = string;    // format: "{name},{EncodedType}(,{slotIndex})?
 
 interface Method {
-    id: string;
+    id?: string; // id field no longer needed, may be omitted in v2
     name: MemberName; 
     range: string; // format: "{start-address}-{end-address}
     params?: Variable[]; 
-    return?: TypeName;
+    return?: EncodedType | "#Void"; // #Void only allowed in v2
     variables?: Variable[]; 
     "sequence-points"?: string[]; // format: "{address}[{document-index}]{start-line}:{start-column}-{end-line}:{end-column}"
 }
 
 interface Event {
-    id: string;
+    id?: string; // id field no longer needed, may be omitted in v2
     name: MemberName; 
     params?: Variable[]; 
 }
 
+// top level debug info properties from v1 of the specification
 interface DebugInformation {
     hash: string; // hex-encoded UInt160
     documents?: string[]; // file paths
@@ -79,11 +123,37 @@ interface DebugInformation {
     methods?: Method[];
     "static-variables"?: Variable[]; 
 }
+
+// Structs only supported in v2
+interface Struct {
+    name: MemberName;
+    fields?: string[]; // format: "{name},{EncodedType}"
+}
+
+// StorageGroups only supported in v2
+interface StorageGroup {
+    name: MemberName;
+    type: ContractType;
+    prefix: string; // format: hex-encoded byte array
+    segments?: string[]; // format: "{name},{EncodedType}"
+}
+
+// top level debug info properties added in v2 of the specification
+interface DebugInfoV2 : DebugInformation {
+    version: number;
+    checksum: number;
+    structs?: Struct[];
+    storages?: StorageGroup[];
+}
 ```
 
-### TypeName
+### EncodedType
 
-TypeNames in Neo debug info are string encoded values from the 
+TBD
+
+### Version 1 Type Model
+
+EncodedTypes in Neo debug info are string encoded values from the 
 [ContractParameterType enum type](https://github.com/neo-project/neo/blob/master/src/neo/SmartContract/ContractParameterType.cs)
 
 * Any
@@ -128,18 +198,28 @@ MemberName string MUST start with a comma (i.e. `',SomeName'`).
 
 Method types have the following fields:
 
-* `id`: a unique string representing the method.
 * `name`: a MemberName with the method's name and optional namespace
-* `range`: the range of NeoVM bytecode addresses that is associated with this method. 
+* `range`: the range of NeoVM script addresses that is associated with this method. 
   Range is encoded as a string with the start and end addresses as integers separated by a dash
-* `params`: a collection of Variable instances representing the NeoVM arguments associated with this method
-* `return`: the TypeName of the method's return value
-* `variables`: a collection of Variable instances representing the NeoVM local variables associated with this method
-* `sequence-points`: a collection of strings that encode a map of NeoVM bytecode addresses back to source code locations.
+* `params`: a collection of Variable instances representing the NeoVM arguments associated with this
+  method
+* `return`: the EncodedType method's return value or `#Void`
+* `variables`: a collection of Variable instances representing the NeoVM local variables associated
+  with this method
+* `sequence-points`: a collection of strings that encode a map of NeoVM script addresses back to
+  source code locations.
 
-Note, `params`, `return`, `variables` and `sequence-points` are all optional. A Method object with no `return`
-property will default to having `Void` return type. A Method object with no `params`, `variables` or `sequence-points`
-properties will default to having an empty array of the collection in question.
+While the v1 ContractParameterType model has a `Void` value, the v2 ContractType model purposefully
+lacks a mechanism to encode the `void` type. While many programming languages do support a general
+use `void` or `unit` type, Neo contracts only support `void` as a method return type. As such, void
+return methods in a v2 debug info file may specify `#Void` as their `return` property value, even
+though that is not a legal encoded ContractType as described above. `#Void` cannot be specified
+for any other EncodedType except method `return` properties in a v2 debug info file.
+
+Note, `params`, `return`, `variables` and `sequence-points` properties are all optional. A Method object
+with no `return` property will default to having no return value (aka void return). A Method object
+with no `params`, `variables` or `sequence-points` properties will default to having an empty array
+of the collection in question.
 
 A sequence point contains six integers encoded into a single string
 
@@ -165,7 +245,6 @@ The six integers of a single sequence point are string encoded using this patter
 
 Event types have the following fields:
 
-* `id`: a unique string representing the method.
 * `name`: a MemberName with the method's name and optional namespace
 * `params`: a collection of Variable instances representing the NeoVM arguments associated with this event
 
@@ -176,11 +255,21 @@ empty `params` array.
 
 Top level debug information has the following fields
 
+#### `version`
+
+This property stores an integer representing the version of the format a given debug info file is using.
+This value MUST be `1` or `2`. If omitted, this property defaults to version `1`.
+ 
 #### `hash`
 
 This property stores the UInt160 hash value of the contract's `Script`. Note, this is *NOT* the same as a
 deployed contract's script hash. The debugger uses this hash value to map deployed contracts to their
 debug information. The hash value is stored as a hex encoded string with an optional "0x" prefix.
+
+#### `checksum`
+
+This property stores the contract's NEF file checksum value. This field is required for version 2 and
+later debug info documents. 
 
 #### `documents`
 
@@ -203,13 +292,9 @@ If omitted, this property defaults to an empty array.
 
 #### `events`
 
-This field stores an array of Event types, each representing an event in the contract. 
-
-Event types have the following fields:
-
-* id: a unique string representing the method.
-* name: a Method name with the method's name and optional namespace
-* params: a collection of Variable instances representing the notification arguments associated with this method
+This property stores an array of Event types as described above. Each Event object represents a parameters
+of a contract notification that may be fired during contract execution. If omitted, this property defaults
+to an empty array.
 
 ## Backwards Compatibility
 
