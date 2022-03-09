@@ -127,15 +127,15 @@ interface DebugInformation {
 // Structs only supported in v2
 interface Struct {
     name: MemberName;
-    fields?: string[]; // format: "{name},{EncodedType}"
+    fields?: string[]; // format: "{name},{string encoded ContractType}"
 }
 
 // StorageGroups only supported in v2
 interface StorageGroup {
     name: MemberName;
-    type: ContractType;
+    type: EncodedType; // Must be string encoded ContractType
     prefix: string; // format: hex-encoded byte array
-    segments?: string[]; // format: "{name},{EncodedType}"
+    segments?: string[]; // format: "{name},{string encoded ContractType}"
 }
 
 // top level debug info properties added in v2 of the specification
@@ -196,7 +196,7 @@ MemberName string MUST start with a comma (i.e. `',SomeName'`).
 
 ### Method
 
-Method types have the following fields:
+Method types have the following properties:
 
 * `name`: a MemberName with the method's name and optional namespace
 * `range`: the range of NeoVM script addresses that is associated with this method. 
@@ -243,7 +243,7 @@ The six integers of a single sequence point are string encoded using this patter
 
 ### Event
 
-Event types have the following fields:
+Event types have the following properties:
 
 * `name`: a MemberName with the method's name and optional namespace
 * `params`: a collection of Variable instances representing the NeoVM arguments associated with this event
@@ -251,11 +251,46 @@ Event types have the following fields:
 Note, like Method types, `params` is optional. An event object with no `params` property will default to an
 empty `params` array.
 
+### Struct
+
+Struct types have the following properties
+
+* `name`: a MemberName with the struct's name and optional namespace
+* `fields`: a collection of strings containing each field's name and string encoded ContractType. 
+  Basically the same as a Variable without any slot index info.
+
+Because Structs are a v2 feature, the field type MUST be a string encoded ContractType rather
+than a ContractParamterType.
+
+Note, `fields` is optional. A struct object with no `fields` property will default to an
+empty `fields` array.
+
+### StorageGroup
+
+StorageGroup types have the following properties
+
+* `name`: a MemberName with the storage group's name and optional namespace
+* `type`: the string encoded ContractType
+* `prefix`: a hex-encoded byte array of the hard coded prefix for all keys in this group
+* `segments`: a collection of strings containing each fields name and string encoded ContractType.
+  Similar to a Variable without slot index info, except that the ContractType must be a primitive type.
+
+Because StorageGroups are a v2 feature, the storage group type and each segment type MUST be a string
+encoded ContractType. Furthermore, segment types SHOULD be *PRIMITIVE* Contract Types and each segment
+except for the last segment SHOULD be a fixed size (Address, Hash160, Hash256, PublicKey and Signature).
+The debugger does not support non primitive keys or variable-length segments that precede other segments.
+In those cases, the debugger will simply default to a single key segment with primitive ByteArray type.
+
+Note, `segments` is optional. A StorageGroup object with no `segments` property will default to an
+empty `segments` array.
+
 ### DebugInformation
 
-Top level debug information has the following fields
+Top level debug information has the following properties
 
 #### `version`
+
+> Note, this property was added in v2
 
 This property stores an integer representing the version of the format a given debug info file is using.
 This value MUST be `1` or `2`. If omitted, this property defaults to version `1`.
@@ -267,6 +302,8 @@ deployed contract's script hash. The debugger uses this hash value to map deploy
 debug information. The hash value is stored as a hex encoded string with an optional "0x" prefix.
 
 #### `checksum`
+
+> Note, this property was added in v2.
 
 This property stores the contract's NEF file checksum value. This field is required for version 2 and
 later debug info documents. 
@@ -296,11 +333,32 @@ This property stores an array of Event types as described above. Each Event obje
 of a contract notification that may be fired during contract execution. If omitted, this property defaults
 to an empty array.
 
+#### `structs`
+
+> Note, this property was added in v2.
+
+This property stores an array of Struct types as described above. Each Struct object represents a
+heterogeneous collection of named fields, each with a specified type. These structs may be used both
+runtime NeoVM types as well as serialized storage types. If omitted, this property defaults to an
+empty array.
+
+#### `storageGroups`
+
+> Note, this property was added in v2.
+
+This property stores an array of StorageGroup types as described above. Each StorageGroup object
+represents a prefixed collection of one or more storage key/items. These storageGroups are used
+to decode contract storage for the debugger. If omitted, this property defaults to an empty array.
+
 ## Backwards Compatibility
+
+> Note, as described above, type encoding for v2 debug information is not backwards compatible
+  with v1 debug information. This section describes backwards compatibility with Neo debug
+  formats prior to the v1 version of this NEP.
 
 Initial preview releases of the Neo Smart Contract Debugger for Neo Legacy used a more verbose
 format for debug info. That format was incompatible with the format described in this document,
-but never shipped a production release. Production releases of the Neo Legacy debugger use a
+but never shipped in a production release. Production releases of the Neo Legacy debugger use a
 slightly different version of the format described in this document.
 
 The Neo N3 Debugger initially shipped during preview without the DebugInformation `static-variables`
