@@ -33,11 +33,10 @@ About six months after Neo N3 MainNet shipped, the debugger shipped a preview fe
 Storage Schema improves the developer experience by automatically decoding the contents of contract
 storage keys and items.
 
-In order to decode storage keys and items, the debugger needs type information about contract
-storage. For the initial preview release, this type information lives in a separate JSON file
-that is written by hand. Obviously, forcing the developer to maintain a separate file is less than
-ideal, so work started on upgrading the NCCS compiler to emit storage schema information automatically
-from source code.
+The debugger needs type information about contract storage in order to decode storage keys and items.
+For the initial preview release, this type information lives in a separate JSON file written by hand.
+Obviously, forcing the developer to maintain a separate file of type information is less than ideal.
+NCCS was upgraded to emit storage schema information automatically from source code.
 
 As part of this work, a model for storage type information was created. While the runtime types
 were limited to type information that can be encoded as a
@@ -61,7 +60,7 @@ if they so choose.
 
 > Note, generating richer contract type model in NCCS is straightforward in part because of the rich type
   information available in C#. Supporting some aspects of the new contract type model may be more difficult
-  or impossible in Neo compilers for dynamic lanugages such as Python. The v2 format has been designed
+  or impossible in Neo compilers for dynamic languages such as Python. The v2 format has been designed
   with such language limitations in mind. However, the contract type model is expected to evolve based
   on feedback from Neo compiler teams as they upgrade their compilers to enable the new debugger functionality.
 
@@ -70,8 +69,202 @@ if they so choose.
 Version 1 of this format has been implemented by the Neo Smart Contract Debugger and multiple Neo smart contract
 compilers including NCCS, NEON, neo-boa, Neow3j and neo-go.
 
-Version 2 of this format enables an improved variable inspection experience and supports both runtime and
-storage types.
+Version 2 of this format enables an improved variable inspection experience and supports unified type information
+for both runtime and storage items.
+
+## NeoVM Item Type Model
+
+Generally, type information is used to decode NeoVM types during debugging. For example, 
+NeoVM has no native string type - strings are represented in NeoVM as 
+[ByteStrings](https://github.com/neo-project/neo-vm/blob/master/src/neo-vm/Types/ByteString.cs).
+There is no way to tell that a given ByteString represents a string or not. However, with type
+information about a runtime or storage type available from the debug info file, the debugger can
+tell if a ByteString actually represents some higher order type such as a string, and address 
+or even a serialized compound type.
+
+The primary difference between v1 and v2 of the debug info format is the way type information is encoded.
+Version 1 uses the existing [ContractParameterType enum type](https://github.com/neo-project/neo/blob/master/src/neo/SmartContract/ContractParameterType.cs)
+while Version 2 defines a type hierarchy (with string encoding) to represent additional type
+information that would be impossible to encode with ContractParameterType.
+
+### ContractType Type Model (Version 2)
+
+This section describes both the abstract ContractType model as well as the concrete syntax used to 
+string encoding ContractTypes.
+
+> Note, because the ContractType model namespace is unbounded (i.e. contract developers can define
+  their own named structs), built-in ContractTypes use a `#` prefix when serialized. This eliminates
+  the possibility of a name collision since `#` is not a supported identifier character in most
+  programming languages.
+
+The Version 2 type model includes six concrete ContractTypes. 
+
+* `Unspecified`: Represents missing or unknown contract type information.
+* `Primitive`: Represents contract type that stored in a NeoVM primitive type
+* `Interop`: Represents a NeoVM InteropInterface object
+* `Struct`: Represents a named, heterogenous collection of typed fields
+* `Array`: Represents a homogenous collection of typed objects
+* `Map`: Represents a typed mapping of key type to value type
+
+#### Unspecified ContractType
+
+This is a contract type for which there is no further information available. Type information may be
+unspecified because the compiler did not generate it or because of baseline validation done by the
+debugger. For example, if the debug info claims a given variable should be an Array, but the
+associated NeoVM stack item is *not* an array, the debugger will automatically substitute Unspecified
+as the ContractType. 
+
+Unspecified ContractType is serialized as the string `#Unspecified`.
+
+#### Primitive ContractType
+
+This is a contract type that can be represented by a NeoVM PrimitiveType (Boolean, Integer or ByteString).
+These types are serialized as byte arrays directly without the encoding needed by composite types.
+There are nine primitive types: 
+
+* `Boolean`
+* `Integer`
+* `ByteArray`
+* `String`
+* `Hash160`
+* `Hash256`
+* `PublicKey`
+* `Signature`
+* `Address`
+
+A primitive ContractType is serialized as it's name prefixed with the `#`. So a String primitive is 
+serialized as `#String` 
+
+There is significant overlap between this list and the list of `ContractParameterType`s used in v1.
+Notable changes are:
+
+* `ContractParameterType.Any` is represented as Unspecified as described above
+* Only includes types represented in NeoVM as a PrimitiveType instance. This removes `ContractParameterType`
+  values `Array`, `Map` and `InteropInterface`
+* `Void` is not a valid type in NeoVM, except as method return type. As such it is purposefully
+  excluded from the ContractType model. Methods may specify `#Void` as their return type as described 
+  below
+* `Address` has been added to the list - there was no `Address` type in `ContractParameterType`. 
+  Like `Hash160`, `Address` is a ByteString 20 bytes long. However, where `Hash160` values are typically
+  displayed by the debugger as a hex string, `Address` values are displayed as Neo N3 standard address
+  strings, such as `NaTtKdE8nt1E9FKKhH6hScXmDGPjgjpdhi`.
+
+#### Interop ContractType
+
+This is a ContractType that represents a NeoVM InteropInterface type. InteropInterface are opaque at
+runtime - there is no way to query an InteropInterface instance for the .NET type that it wraps. However,
+such information is typically available at compile time, so instead of simply rendering an opaque Interop
+type in the debugger, the debug info can contain the name of the .NET type that the InteropInterface wraps.
+
+An interop contract type is serialized as `#Interop<{wrapped-type-name}>` with the name of the wrapped
+type inside the angle brackets.
+
+> Note, only the core Neo platform can define InteropInterface instances. As such, contract developers can
+  never generate an InteropContractType unless provided by the platform.
+
+#### Struct ContractType
+
+This is a ContractType that represents a heterogeneous collection of fields. It is represented in the NeoVM
+as an Array or Struct type. NeoVM Struct inherits from NeoVM Array and their use in deployed contracts can be
+inconsistent. As such, the debugger ignores NeoVM structs and simply interacts with Array. 
+
+When displaying a Struct ContractType, the debugger validates that the associated NeoVM type is an array and
+that the array length matches the struct field count. If this validation fails, the NeoVM item is displayed
+as if the debug information was Unspecified.
+
+Each field of a struct has a name and a type. Any type may be specified as a field type. This implies structs
+can create a hierarchy - for example a Person struct could contain a Name field, which in turn has FirstName
+and LastName fields.
+
+Structs have a developer-specified name and which can be used to extend the global namespace of types. To avoid
+name collisions, built-in ContractType have a `#` in their serialized format. As such, Structs may not have a `#`
+in them. Additionally, user specified generic are not supported so structs may not have `<` or `>` in their names.
+This applies to both the namespace and name segments of a struct's MemberName.
+
+There are a collection of built in structs provided by the Neo platform such as Block and Transaction. Definitions
+of these structs are provided by the debugger and they live in the namespace `#Neo`. 
+
+Structs are serialized as the MemberName namespace and name, separated by a period. So the built in Block type
+is serialized as `#Neo.Block` where a user defined type would be something like `Some.Namespace.TheTypeName`.
+
+> Note, while serialized MemberNames separate namespace from name with a comma, serialized ContractTypes are
+  used in comma separated strings, so the comma has to be replaced with some other character. At this time,
+  there is no forseen need to separate a struct name from its namespace at all. If there was such a need, using
+  the segment of the name following the final period seems reasonable. However, if a need arises, some other
+  non-comma, non-period character may be used to separate struct namespace from name.
+
+#### Array ContractType
+
+This contract type represents a homogenous collection of items. It is represented in the NeoVM by the Array
+type.
+
+An Array ContractType has a single type argument, specify the type contained within the array. If the types
+of the items in the array may not be consistent, Unspecified can be specified as the type argument.
+
+Array ContractType is serialized as `#Array<{array item ContractType}>`. If the array item type is omitted
+(i.e. `#Array<>`), Unspecified is used as the default. Arrays may contain any other ContractType, including 
+other arrays (i.e. `#Array<#Array<#String>>` is allowed).
+
+#### Map ContractType
+
+This contract type represents a mapping of primitive key to a ContractType value. It is represented in the
+NeoVM by the Map type.
+
+A Map ContractType has two type arguments, specifying the type of the key and the value in the map array.
+The key type of a Map *MUST* be a primitive type (described above). There are no restrictions on the Map
+value type. Maps of Maps (i.e. `#Map<#Integer:#Map<#String,#Address>>`) are allowed.
+
+Maps are serialized as `#Map<{key type}:{value type}>`. Note, the colon character is used to separate type
+arguments since comma are used as a separator elsewhere. If the map type arguments are omitted (i.e. `#Map<>`),
+`#Map<#ByteArray,#Unspecified>` is used as the default.
+
+### ContractParameterType Model (Version 1)
+
+EncodedTypes in v1 Neo debug info are string encoded values of the 
+[ContractParameterType enum type](https://github.com/neo-project/neo/blob/master/src/neo/SmartContract/ContractParameterType.cs)
+
+* `Any`
+* `Boolean`
+* `Integer`
+* `ByteArray`
+* `String`
+* `Hash160`
+* `Hash256`
+* `PublicKey`
+* `Signature`
+* `Array`
+* `Map`
+* `InteropInterface`
+* `Void`
+
+The `Any` ContractParameterType acts like missing or unknown type information. Only information about
+item in question available from the runtime will be used to decode.
+
+Note, the Void ContractParameterType value is only permitted for use as method return values.
+
+#### Mapping ContractParameterType to ContractType
+
+While the updated debugger supports both v1 and v2 debug information files, internally it maps
+the limited set of ContractParameterTypes to a specific ContractType.
+
+For the ContractParameterTypes values that overlap with Primitive ContractTypes, the mapping is
+one to one. For example. `ContractParameterTypes.Hash160` maps to `PrimitiveContractType.Hash160`
+(encoded as `#Hash160`).
+
+`ContractParameterTypes.Any` maps to the Unspecified ContractType (i.e. `#Unspecified`).
+
+`ContractParameterTypes.Array` maps to an Array ContractType with an unspecified array type argument
+(i.e. `#Array<#Unspecified>`).
+
+`ContractParameterTypes.Map` maps to an Map ContractType with a ByteArray key type argument and an 
+unspecified value type argument (i.e. `#Map<#ByteArray:#Unspecified>`).
+
+`ContractParameterTypes.InteropInterface` maps to an interop Contract Type where the wrapped
+type name is missing (i.e. `#Interop<>`).
+
+As previously explained, `ContractParameterTypes.Void` does not map to a Contract Type. For method 
+return types that have `ContractParameterTypes.Void`, this is mapped to the void return string '#Void'.
+Otherwise, attempting to map `ContractParameterTypes.Void` to a Contract Type fails.
 
 ## Debug Info Format Specification
 
@@ -149,31 +342,10 @@ interface DebugInfoV2 : DebugInformation {
 
 ### EncodedType
 
-TBD
+EncodedType is simply string encoded type information. Details are above in the Type Model section.
 
-### Version 1 Type Model
-
-EncodedTypes in Neo debug info are string encoded values from the 
-[ContractParameterType enum type](https://github.com/neo-project/neo/blob/master/src/neo/SmartContract/ContractParameterType.cs)
-
-* Any
-* Boolean
-* Integer
-* ByteArray
-* String
-* Hash160
-* Hash256
-* PublicKey
-* Signature
-* Array
-* Map
-* InteropInterface
-* Void
-
-Generally, this type information is used to decode NeoVM types during debugging. For example, NeoVM has no
-native string type - strings are represented in NeoVM as a [ByteString](https://github.com/neo-project/neo-vm/blob/master/src/neo-vm/Types/ByteString.cs).
-The additional type information enables the debugger to treat the bytes in the NeoVM ByteString as a UTF-8
-encoded string in order to decode the string for the developer.
+Note, *ALL* EncodedTypes in a v1 debug info file *MUST* be ContractParameterType values while *ALL* EncodedTypes
+in a v2 debug info file *MUST* be string encoded ContractTypes. 
 
 ### Variable
 
@@ -260,7 +432,7 @@ Struct types have the following properties
   Basically the same as a Variable without any slot index info.
 
 Because Structs are a v2 feature, the field type MUST be a string encoded ContractType rather
-than a ContractParamterType.
+than a ContractParameterType.
 
 Note, `fields` is optional. A struct object with no `fields` property will default to an
 empty `fields` array.
