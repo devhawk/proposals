@@ -140,7 +140,8 @@ Notable changes are:
 
 * `ContractParameterType.Any` is represented as Unspecified as described above
 * Only includes types represented in NeoVM as a PrimitiveType instance. This removes `ContractParameterType`
-  values `Array`, `Map` and `InteropInterface`
+  values `Array`, `Map` and `InteropInterface`. These non-primitive types are represented as explicit
+  ContractType subclasses and are described below.
 * `Void` is not a valid type in NeoVM, except as method return type. As such it is purposefully
   excluded from the ContractType model. Methods may specify `#Void` as their return type as described 
   below
